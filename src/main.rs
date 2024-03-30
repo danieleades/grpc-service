@@ -10,15 +10,44 @@ use windows_service::{
     service_dispatcher,
 };
 mod server;
-
-mod channel;
 mod service;
+
+use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 
 const SERVICE_NAME: &str = "asset-service-rs";
 const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 const LOG_DIRECTORY: &str = r"C:\Users\daniel.eades\Desktop";
 
 define_windows_service!(ffi_service_main, service_main);
+
+#[derive(Debug)]
+struct ServiceEvent {
+    service_control: ServiceControl,
+    completion_tx: oneshot::Sender<ServiceControlHandlerResult>,
+}
+
+impl ServiceEvent {
+    fn new(
+        service_control: ServiceControl,
+        completion_tx: oneshot::Sender<ServiceControlHandlerResult>,
+    ) -> Self {
+        Self {
+            service_control,
+            completion_tx,
+        }
+    }
+
+    fn service_control(&self) -> ServiceControl {
+        self.service_control
+    }
+
+    fn complete(self, result: ServiceControlHandlerResult) {
+        if self.completion_tx.send(result).is_err() {
+            tracing::error!("Failed to send a completion reply");
+        }
+    }
+}
 
 fn service_main(arguments: Vec<OsString>) {
     if let Err(e) = run_service(&arguments) {
@@ -28,28 +57,26 @@ fn service_main(arguments: Vec<OsString>) {
 
 #[tracing::instrument(err)]
 fn run_service(arguments: &[OsString]) -> Result<(), Error> {
-    let address = SocketAddr::from_str("[::1]:10000").unwrap();
     let rt = tokio::runtime::Runtime::new().unwrap();
 
-    let (grpc_shutdown_tx, grpc_shutdown_rx) = channel::channel();
-    let grpc_shutdown_signal = async move { grpc_shutdown_rx.recv().await };
-
-    let grpc_task_handle = rt.spawn(service::run(address, grpc_shutdown_signal));
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
 
     let event_handler = move |control: ServiceControl| {
-        tracing::debug!("received a control command: {:?}", &control);
-        match control {
-            ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
-            ServiceControl::Stop => {
-                tracing::debug!("received stop request");
-                // send shutdown command to gRPC server
-                tracing::debug!("sending gRPC shutdown command");
-                rt.block_on(grpc_shutdown_tx.send());
-                tracing::debug!("gRPC shutdown command sent");
+        tracing::debug!("received a control command: {:?}", control);
 
-                ServiceControlHandlerResult::NoError
+        let (completion_tx, completion_rx) = oneshot::channel();
+
+        match event_tx.send(ServiceEvent::new(control, completion_tx)) {
+            Ok(()) => completion_rx
+                .blocking_recv()
+                .inspect_err(|e| {
+                    tracing::error!("Couldn't receive a completion reply: {}", e);
+                })
+                .unwrap_or(ServiceControlHandlerResult::Other(127)),
+            Err(e) => {
+                tracing::error!("Couldn't send the event: {}", e);
+                ServiceControlHandlerResult::Other(128)
             }
-            _ => ServiceControlHandlerResult::NotImplemented,
         }
     };
 
@@ -67,10 +94,34 @@ fn run_service(arguments: &[OsString]) -> Result<(), Error> {
     })?;
     tracing::info!("service status is 'running'");
 
-    tokio::runtime::Runtime::new()
-        .unwrap()
-        .block_on(grpc_task_handle)
-        .unwrap();
+    rt.block_on(async {
+        let shutdown_token = CancellationToken::new();
+        let shutdown_fut = shutdown_token.clone().cancelled_owned();
+
+        let address = SocketAddr::from_str("[::1]:10000").unwrap();
+        let mut service_join_handle = Some(tokio::spawn(service::run(address, shutdown_fut)));
+
+        while let Some(service_event) = event_rx.recv().await {
+            let service_control_result: ServiceControlHandlerResult =
+                match service_event.service_control() {
+                    ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
+                    ServiceControl::Stop => {
+                        shutdown_token.cancel();
+
+                        if let Some(service_join_handle) = service_join_handle.take() {
+                            if let Err(e) = service_join_handle.await {
+                                tracing::error!("Couldn't join on service: {}", e);
+                            }
+                        }
+
+                        ServiceControlHandlerResult::NoError
+                    }
+                    _ => ServiceControlHandlerResult::NotImplemented,
+                };
+
+            service_event.complete(service_control_result);
+        }
+    });
 
     tracing::debug!("gRPC server has shutdown");
 
@@ -85,14 +136,14 @@ fn run_service(arguments: &[OsString]) -> Result<(), Error> {
         process_id: None,
     })?;
 
-
     Ok(())
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let file_appender = tracing_appender::rolling::hourly(LOG_DIRECTORY, "grpc-service.log");
+    let file_appender = tracing_appender::rolling::daily(LOG_DIRECTORY, "grpc-service.log");
     let subscriber = tracing_subscriber::fmt()
         .with_writer(file_appender)
+        .with_max_level(tracing::Level::DEBUG)
         .finish();
 
     // Set the subscriber globally for the application

@@ -22,7 +22,7 @@ fn main() -> windows_service::Result<()> {
         service_type: ServiceType::OWN_PROCESS,
         start_type: ServiceStartType::OnDemand,
         error_control: ServiceErrorControl::Normal,
-        executable_path: service_binary_path.to_path_buf(),
+        executable_path: service_binary_path,
         launch_arguments: vec![],
         dependencies: vec![],
         account_name: None, // run as System

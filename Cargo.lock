@@ -306,7 +306,7 @@ version = "0.1.0"
 dependencies = [
  "futures-util",
  "prost",
- "seebyte-service-handler",
+ "service-handler",
  "thiserror",
  "tokio",
  "tokio-util",
@@ -818,17 +818,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ffc183a10b4478d04cbbbfc96d0873219d962dd5accaff2ffbd4ceb7df837f4"
 
 [[package]]
-name = "seebyte-service-handler"
-version = "0.1.0"
-dependencies = [
- "futures-util",
- "thiserror",
- "tokio",
- "tracing",
- "windows-service",
-]
-
-[[package]]
 name = "serde"
 version = "1.0.197"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -846,6 +835,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "service-handler"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "windows-service",
 ]
 
 [[package]]

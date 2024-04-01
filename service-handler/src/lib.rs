@@ -1,14 +1,21 @@
-use std::{ffi::OsString, time::Duration};
+use std::time::Duration;
 
-use futures_util::Stream;
+use futures_util::{Future, Stream};
 use tokio::sync::{mpsc, oneshot};
-use windows_service::{define_windows_service, service::{ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus}, service_control_handler::{self, ServiceControlHandlerResult}, service_dispatcher};
+use windows_service::{
+    service::{
+        ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,
+        ServiceType,
+    },
+    service_control_handler::{self, ServiceControlHandlerResult},
+};
 
+const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 
-pub trait SeebyteService {
-    async fn run(&self, event_rx: impl Stream<Item = ServiceEvent> + Unpin);
+pub trait Server: std::fmt::Debug {
+    const NAME: &'static str;
+    fn run(&self, event_rx: impl Stream<Item = ServiceEvent> + Unpin) -> impl Future<Output = ()>;
 }
-
 
 #[derive(Debug)]
 pub struct ServiceEvent {
@@ -38,21 +45,8 @@ impl ServiceEvent {
     }
 }
 
-pub fn run<T: SeebyteService>(service: T) {
-
-}
-
-define_windows_service!(ffi_service_main, service_main);
-
-
-fn service_main(arguments: Vec<OsString>) {
-    if let Err(e) = run_service(&arguments) {
-        tracing::error!("error: {}", e);
-    }
-}
-
 #[tracing::instrument(err)]
-fn run_service(arguments: &[OsString]) -> Result<(), Error> {
+pub fn run_service<S: Server>(service: S) -> Result<(), Error> {
     let rt = tokio::runtime::Runtime::new()?;
 
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
@@ -77,7 +71,7 @@ fn run_service(arguments: &[OsString]) -> Result<(), Error> {
         }
     };
 
-    let status_handle = service_control_handler::register(SERVICE_NAME, event_handler)?;
+    let status_handle = service_control_handler::register(S::NAME, event_handler)?;
 
     tracing::info!("setting service status to 'running'...");
     status_handle.set_service_status(ServiceStatus {
@@ -91,7 +85,6 @@ fn run_service(arguments: &[OsString]) -> Result<(), Error> {
     })?;
     tracing::info!("service status is 'running'");
 
-    let service = GrpcService::default();
     rt.block_on(service.run(event_rx));
 
     tracing::debug!("gRPC server has shutdown");
@@ -110,13 +103,8 @@ fn run_service(arguments: &[OsString]) -> Result<(), Error> {
     Ok(())
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    service_dispatcher::start(SERVICE_NAME, ffi_service_main)?;
-    Ok(())
-}
-
 #[derive(Debug, thiserror::Error)]
-enum Error {
+pub enum Error {
     #[error("windows service error: {0}")]
     WindowsService(#[from] windows_service::Error),
 

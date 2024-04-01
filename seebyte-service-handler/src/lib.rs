@@ -1,25 +1,46 @@
 use std::{ffi::OsString, time::Duration};
 
-use seebyte_service_handler::{SeebyteService, ServiceEvent};
-use windows_service::{
-    define_windows_service,
-    service::{
-        ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,
-        ServiceType,
-    },
-    service_control_handler::{self, ServiceControlHandlerResult},
-    service_dispatcher,
-};
-mod server;
-mod service;
-
+use futures_util::Stream;
 use tokio::sync::{mpsc, oneshot};
+use windows_service::{define_windows_service, service::{ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus}, service_control_handler::{self, ServiceControlHandlerResult}, service_dispatcher};
 
-use crate::service::GrpcService;
 
-pub const SERVICE_NAME: &str = "grpc-service-rs";
-const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
-const LOG_DIRECTORY: &str = r"C:\Users\daniel.eades\Desktop";
+pub trait SeebyteService {
+    async fn run(&self, event_rx: impl Stream<Item = ServiceEvent> + Unpin);
+}
+
+
+#[derive(Debug)]
+pub struct ServiceEvent {
+    service_control: ServiceControl,
+    completion_tx: oneshot::Sender<ServiceControlHandlerResult>,
+}
+
+impl ServiceEvent {
+    pub fn new(
+        service_control: ServiceControl,
+        completion_tx: oneshot::Sender<ServiceControlHandlerResult>,
+    ) -> Self {
+        Self {
+            service_control,
+            completion_tx,
+        }
+    }
+
+    pub fn service_control(&self) -> ServiceControl {
+        self.service_control
+    }
+
+    pub fn complete(self, result: ServiceControlHandlerResult) {
+        if self.completion_tx.send(result).is_err() {
+            tracing::error!("Failed to send a completion reply");
+        }
+    }
+}
+
+pub fn run<T: SeebyteService>(service: T) {
+
+}
 
 define_windows_service!(ffi_service_main, service_main);
 
@@ -90,26 +111,12 @@ fn run_service(arguments: &[OsString]) -> Result<(), Error> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let file_appender = tracing_appender::rolling::daily(LOG_DIRECTORY, "grpc-service.log");
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(file_appender)
-        .with_max_level(tracing::Level::DEBUG)
-        .with_ansi(false)
-        .finish();
-
-    // Set the subscriber globally for the application
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("Failed to set the global default subscriber");
-
     service_dispatcher::start(SERVICE_NAME, ffi_service_main)?;
     Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]
 enum Error {
-    #[error("gRPC transport error: {0}")]
-    Transport(#[from] tonic::transport::Error),
-
     #[error("windows service error: {0}")]
     WindowsService(#[from] windows_service::Error),
 
